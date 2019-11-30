@@ -5,6 +5,9 @@
    ==================================================================
 */
 //Modified by Johnathan Teav
+//Compile with nvcc proj2-jmteav.cu
+//Run with ./a.out [#of_samples][bucket_width][block_size]
+//Example: ./a.out 10000 500.0 32
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
