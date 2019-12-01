@@ -2,7 +2,6 @@
 //Compile with nvcc proj3-jmteav.cu -arch=compute_52 -code=sm_52
 #include <assert.h>
 #include <stdio.h>
-#include <math.h>
 
 #define RAND_RANGE(N) ((double)rand()/((double)RAND_MAX + 1)*(N))
 
@@ -36,17 +35,20 @@ __device__ uint bfe(uint x, uint start, uint nbits)
 }
 
 //define the histogram kernel here
-__global__ void histogram(int* r_h, int rSize, unsigned long long *histo, int num_bins)
+__global__ void histogram(int* r, int rSize, int *histo, int num_bins)
 {
-    unsigned int i, h;
-    for(i = 0; i < rSize; i++){
-            h = bfe(r_h[i], 0, log2f(num_bins));
-            atomicAdd(&(histo[h]), 1);
-    }
+  uint index = blockIdx.x * blockDim.x + threadIdx.x;
+	uint stride = blockDim.x * gridDim.x;
+  uint nbits = log2f(num_bins);
+  uint i, h;
+  for(i = index; i < rSize; i += stride){
+    h = bfe(r[i], 0, nbits);
+    atomicAdd(&(histo[h]), 1);
+  }
 }
 
-//prefix_scan kernal borrowed from CUDA sample
-__global__ void shfl_scan_test(unsigned long long *data, int width, int *partial_sums = NULL) {
+//Prefix scan kernal borrowed from /apps/cuda/7.5/samples/6_Advanced/shfl_scans
+__global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL) {
     extern __shared__ int sums[];
     int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
     int lane_id = id % warpSize;
@@ -119,46 +121,109 @@ __global__ void shfl_scan_test(unsigned long long *data, int width, int *partial
     }  
 }
 
-//define the reorder kernel here
-__global__ void Reorder()
-{
+//Uniform add borrowed from /apps/cuda/7.5/samples/6_Advanced/shfl_scans
+__global__ void uniform_add(int *data, int *partial_sums, int len){
+  __shared__ int buf;
+  int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
 
+  if(threadIdx.x == 0){
+    buf = partial_sums[blockIdx.x];
+  }
+
+  __syncthreads();
+  data[id] += buf;
+}
+
+//define the reorder kernel here
+__global__ void Reorder(int* r, int rSize, int num_bins, int* prefixSum, int* output)
+{
+  uint index = blockIdx.x * blockDim.x + threadIdx.x;
+	uint stride = blockDim.x * gridDim.x;
+  int i, h;
+  uint nbits = log2f(num_bins);
+  int offset;
+  for(i = index; i < rSize; i += stride){
+    h = bfe(r[i], 0, nbits);
+    offset = atomicAdd(&prefixSum[h], 1);
+    output[offset] = i;
+  }
 }
 
 int main(int argc, char const *argv[])
 {
-    int rSize = atoi(argv[1]);
-    int num_bins = atoi(argv[2]);
-    int blockSize = 256;
-    int gridSize = rSize / blockSize;
-    int nWarps = blockSize / 32;
-    int shmem_sz = nWarps * sizeof(int);
+  int rSize = atoi(argv[1]);
+  int num_bins = atoi(argv[2]);
+  int blockSize = 256;
+  int gridSize = (rSize + blockSize -1) / blockSize;
+  int nWarps = blockSize / 32;
+  int shmem_sz = nWarps * sizeof(int);
+  int n_prefixSums = rSize/blockSize;
+  int prefixSize = n_prefixSums * sizeof(int);
 
-    int* r_h; //input array
+  //Declaring input array
+  int* r_h;
+  int *r_d;
+  cudaMallocHost((void**)&r_h, sizeof(int)*rSize); //use pinned memory in host so it copies to GPU faster
+  cudaMalloc((void**)&r_d, sizeof(int)*rSize);
 
-    cudaMallocHost((void**)&r_h, sizeof(int)*rSize); //use pinned memory in host so it copies to GPU faster
-    
-    dataGenerator(r_h, rSize, 0, 1);
+  //dataGenerator(r_h, rSize, 0, 1);
+  int k;
+  for(k = 0; k < rSize; k++){
+    r_h[k] = k;
+  }
+  cudaMemcpy(r_d, r_h, sizeof(int)*rSize, cudaMemcpyHostToDevice);
 
-    //Declaring histogram
-    unsigned long long histo[num_bins];
-    unsigned long long *d_histo;
-    cudaMalloc(&d_histo, num_bins);
+  //Declaring histogram
+  int *h_histo, *d_histo;
+  cudaMallocHost(&h_histo, sizeof(int)*num_bins);
+  cudaMalloc(&d_histo, num_bins*sizeof(int));
+  cudaMemcpy(d_histo, h_histo, num_bins*sizeof(int), cudaMemcpyHostToDevice);
 
-    //Calculating histogram
-    histogram<<<1, 1>>>(r_h, rSize, d_histo, num_bins);
+  //Declaring prefix sum
+  int *h_prefix_sums, *d_prefix_sums;
+  cudaMallocHost(reinterpret_cast<void **>(&h_prefix_sums), prefixSize);
+  cudaMalloc(reinterpret_cast<void **>(&d_prefix_sums), prefixSize);
+  cudaMemset(d_prefix_sums, 0, prefixSize);
 
-    //Performing prefix scan
-    shfl_scan_test<<<gridSize, blockSize, shmem_sz>>>(d_histo, 32);
+  //Declaring output array
+  int *h_output, *d_output;
+  cudaMallocHost((void**)&h_output, sizeof(int)*rSize);
+  cudaMalloc((void**)&d_output, sizeof(int)*rSize);
 
-    cudaMemcpy(histo, d_histo, num_bins, cudaMemcpyDeviceToHost);
-    int i;
-    for(i = 0; i < num_bins; i++){
-        printf("%d\n", histo[i]);
-    }
+  //Calculating histogram
+  histogram<<<gridSize, blockSize>>>(r_d, rSize, d_histo, num_bins);
+  cudaMemcpy(h_histo, d_histo, num_bins*sizeof(int), cudaMemcpyDeviceToHost);
+  int j;
+  for(j = 0; j < num_bins; j++){
+    printf("histo[%d] = %d\n", j, h_histo[j]);
+  }
 
-    cudaFree(d_histo);
-    cudaFreeHost(r_h);
+  //Performing prefix scan
+  shfl_scan_test<<<gridSize, blockSize, shmem_sz>>>(d_histo, 32, d_prefix_sums);
+  shfl_scan_test<<<gridSize, blockSize, shmem_sz>>>(d_prefix_sums, 32);
+  uniform_add<<<gridSize-1, blockSize>>>(d_histo+blockSize, d_prefix_sums, rSize);
+  cudaMemcpy(h_prefix_sums, d_prefix_sums, prefixSize*sizeof(int), cudaMemcpyDeviceToHost);
+  for(int i = 0; i < prefixSize; i++){
+    printf("prefix: %d\n", h_prefix_sums[i]);
+  }
 
-    return 0;
+  //Performing reorder
+  Reorder<<<gridSize, blockSize>>>(r_d, rSize, num_bins, d_prefix_sums, d_output);
+  cudaMemcpy(h_output, d_output, rSize*sizeof(int), cudaMemcpyDeviceToHost);
+  int y;
+  for(y = 0; y < rSize; y++){
+    printf("%d\n", h_output[y]);
+  }
+
+  
+  cudaFreeHost(r_h);
+  cudaFreeHost(h_histo);
+  cudaFreeHost(h_prefix_sums);
+  cudaFreeHost(h_output);
+  cudaFree(r_d);
+  cudaFree(d_histo);
+  cudaFree(d_prefix_sums);
+  cudaFree(d_output);
+
+  return 0;
 }
