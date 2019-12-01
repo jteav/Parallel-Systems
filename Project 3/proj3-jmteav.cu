@@ -35,8 +35,7 @@ __device__ uint bfe(uint x, uint start, uint nbits)
 }
 
 //define the histogram kernel here
-__global__ void histogram(int* r, int rSize, int *histo, int num_bins)
-{
+__global__ void histogram(int* r, int rSize, int *histo, int num_bins){
   uint index = blockIdx.x * blockDim.x + threadIdx.x;
 	uint stride = blockDim.x * gridDim.x;
   uint nbits = log2f(num_bins);
@@ -47,8 +46,18 @@ __global__ void histogram(int* r, int rSize, int *histo, int num_bins)
   }
 }
 
+//define the prefix scan kernel here
+__global__ void prefixScan(int *histo, int num_bins, int *sum){
+  for(int i = 0; i < num_bins; i++){
+    if(i == 0)
+      sum[i] = 0;
+    else
+      sum[i] = histo[i-1]+sum[i-1];
+  }
+}
+
 //Prefix scan kernal borrowed from /apps/cuda/7.5/samples/6_Advanced/shfl_scans
-__global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL) {
+/*__global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL) {
     extern __shared__ int sums[];
     int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
     int lane_id = id % warpSize;
@@ -132,11 +141,10 @@ __global__ void uniform_add(int *data, int *partial_sums, int len){
 
   __syncthreads();
   data[id] += buf;
-}
+}*/
 
 //define the reorder kernel here
-__global__ void Reorder(int* r, int rSize, int num_bins, int* prefixSum, int* output)
-{
+__global__ void Reorder(int* r, int rSize, int num_bins, int* prefixSum, int* output){
   uint index = blockIdx.x * blockDim.x + threadIdx.x;
 	uint stride = blockDim.x * gridDim.x;
   int i, h;
@@ -155,10 +163,6 @@ int main(int argc, char const *argv[])
   int num_bins = atoi(argv[2]);
   int blockSize = 256;
   int gridSize = (rSize + blockSize -1) / blockSize;
-  int nWarps = blockSize / 32;
-  int shmem_sz = nWarps * sizeof(int);
-  int n_prefixSums = rSize/blockSize;
-  int prefixSize = n_prefixSums * sizeof(int);
 
   //Declaring input array
   int* r_h;
@@ -167,8 +171,7 @@ int main(int argc, char const *argv[])
   cudaMalloc((void**)&r_d, sizeof(int)*rSize);
 
   //dataGenerator(r_h, rSize, 0, 1);
-  int k;
-  for(k = 0; k < rSize; k++){
+  for(int k = 0; k < rSize; k++){
     r_h[k] = k;
   }
   cudaMemcpy(r_d, r_h, sizeof(int)*rSize, cudaMemcpyHostToDevice);
@@ -181,9 +184,9 @@ int main(int argc, char const *argv[])
 
   //Declaring prefix sum
   int *h_prefix_sums, *d_prefix_sums;
-  cudaMallocHost(reinterpret_cast<void **>(&h_prefix_sums), prefixSize);
-  cudaMalloc(reinterpret_cast<void **>(&d_prefix_sums), prefixSize);
-  cudaMemset(d_prefix_sums, 0, prefixSize);
+  cudaMallocHost(&h_prefix_sums, sizeof(int)*num_bins);
+  cudaMalloc(&d_prefix_sums, sizeof(int)*num_bins);
+  //cudaMemset(d_prefix_sums, 0, prefixSize);
 
   //Declaring output array
   int *h_output, *d_output;
@@ -199,20 +202,17 @@ int main(int argc, char const *argv[])
   }
 
   //Performing prefix scan
-  shfl_scan_test<<<gridSize, blockSize, shmem_sz>>>(d_histo, 32, d_prefix_sums);
-  shfl_scan_test<<<gridSize, blockSize, shmem_sz>>>(d_prefix_sums, 32);
-  uniform_add<<<gridSize-1, blockSize>>>(d_histo+blockSize, d_prefix_sums, rSize);
-  cudaMemcpy(h_prefix_sums, d_prefix_sums, prefixSize*sizeof(int), cudaMemcpyDeviceToHost);
-  for(int i = 0; i < prefixSize; i++){
-    printf("prefix: %d\n", h_prefix_sums[i]);
+  prefixScan<<<gridSize, blockSize>>>(d_histo, num_bins, d_prefix_sums);
+  cudaMemcpy(h_prefix_sums, d_prefix_sums, num_bins*sizeof(int), cudaMemcpyDeviceToHost);
+  for(int i = 0; i < num_bins; i++){
+    printf("prefix[%d] = %d\n", i, h_prefix_sums[i]);
   }
 
   //Performing reorder
   Reorder<<<gridSize, blockSize>>>(r_d, rSize, num_bins, d_prefix_sums, d_output);
   cudaMemcpy(h_output, d_output, rSize*sizeof(int), cudaMemcpyDeviceToHost);
-  int y;
-  for(y = 0; y < rSize; y++){
-    printf("%d\n", h_output[y]);
+  for(int y = 0; y < rSize; y++){
+    printf("output[%d] = %d\n", y, h_output[y]);
   }
 
   
