@@ -35,19 +35,34 @@ __device__ uint bfe(uint x, uint start, uint nbits)
 }
 
 //define the histogram kernel here
-__global__ void histogram(int* r, int rSize, int *histo, int num_bins){
+__global__ void histogram(int* r, int rSize, unsigned long long *histo, int num_bins){
   uint index = blockIdx.x * blockDim.x + threadIdx.x;
 	uint stride = blockDim.x * gridDim.x;
   uint nbits = log2f(num_bins);
   uint i, h;
+
+  //Privatized bins
+  extern __shared__ unsigned long long histo_s[];
+  for(unsigned int binIdx = threadIdx.x; binIdx < num_bins; binIdx += blockDim.x){
+		histo_s[binIdx] = 0u;
+	}
+  __syncthreads();
+  
+  //Histogram calculations
   for(i = index; i < rSize; i += stride){
     h = bfe(r[i], 0, nbits);
-    atomicAdd(&(histo[h]), 1);
+    atomicAdd(&(histo_s[h]), 1);
   }
+  __syncthreads();
+
+  //Commit to global memory
+  for(int binIdx = threadIdx.x; binIdx < num_bins; binIdx += blockDim.x){
+		atomicAdd(&(histo[binIdx]), histo_s[binIdx]);
+	}
 }
 
 //define the prefix scan kernel here
-__global__ void prefixScan(int *histo, int num_bins, int *sum){
+__global__ void prefixScan(unsigned long long *histo, int num_bins, int *sum){
   for(int i = 0; i < num_bins; i++){
     if(i == 0)
       sum[i] = 0;
@@ -56,93 +71,6 @@ __global__ void prefixScan(int *histo, int num_bins, int *sum){
   }
 }
 
-//Prefix scan kernal borrowed from /apps/cuda/7.5/samples/6_Advanced/shfl_scans
-/*__global__ void shfl_scan_test(int *data, int width, int *partial_sums = NULL) {
-    extern __shared__ int sums[];
-    int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
-    int lane_id = id % warpSize;
-    // determine a warp_id within a block
-    int warp_id = threadIdx.x / warpSize;
-  
-    // Below is the basic structure of using a shfl instruction
-    // for a scan.
-    // Record "value" as a variable - we accumulate it along the way
-    int value = data[id];
-  
-    // Now accumulate in log steps up the chain
-    // compute sums, with another thread's value who is
-    // distance delta away (i).  Note
-    // those threads where the thread 'i' away would have
-    // been out of bounds of the warp are unaffected.  This
-    // creates the scan sum.
-  #pragma unroll
-    for (int i = 1; i <= width; i *= 2) {
-      int n = __shfl_up(value, i, width);
-  
-      if (lane_id >= i) value += n;
-    }
-  
-    // value now holds the scan value for the individual thread
-    // next sum the largest values for each warp
-  
-    // write the sum of the warp to smem
-    if (threadIdx.x % warpSize == warpSize - 1) {
-      sums[warp_id] = value;
-    }
-  
-    __syncthreads();
-  
-    //
-    // scan sum the warp sums
-    // the same shfl scan operation, but performed on warp sums
-    //
-    if (warp_id == 0 && lane_id < (blockDim.x / warpSize)) {
-  
-      int warp_sum = sums[lane_id];
-  
-      for (int i = 1; i <= width; i *= 2) {
-        int n = __shfl_up(warp_sum, i, width);
-  
-        if (lane_id >= i) warp_sum += n;
-      }
-  
-      sums[lane_id] = warp_sum;
-    }
-  
-    __syncthreads();
-  
-    // perform a uniform add across warps in the block
-    // read neighbouring warp's sum and add it to threads value
-    int blockSum = 0;
-  
-    if (warp_id > 0) {
-      blockSum = sums[warp_id - 1];
-    }
-  
-    value += blockSum;
-  
-    // Now write out our result
-    data[id] = value;
-  
-    // last thread has sum, write write out the block's sum
-    if (partial_sums != NULL && threadIdx.x == blockDim.x - 1) {
-      partial_sums[blockIdx.x] = value;
-    }  
-}
-
-//Uniform add borrowed from /apps/cuda/7.5/samples/6_Advanced/shfl_scans
-__global__ void uniform_add(int *data, int *partial_sums, int len){
-  __shared__ int buf;
-  int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
-
-  if(threadIdx.x == 0){
-    buf = partial_sums[blockIdx.x];
-  }
-
-  __syncthreads();
-  data[id] += buf;
-}*/
-
 //define the reorder kernel here
 __global__ void Reorder(int* r, int rSize, int num_bins, int* prefixSum, int* output){
   uint index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -150,6 +78,7 @@ __global__ void Reorder(int* r, int rSize, int num_bins, int* prefixSum, int* ou
   int i, h;
   uint nbits = log2f(num_bins);
   int offset;
+  
   for(i = index; i < rSize; i += stride){
     h = bfe(r[i], 0, nbits);
     offset = atomicAdd(&prefixSum[h], 1);
@@ -166,21 +95,14 @@ int main(int argc, char const *argv[])
 
   //Declaring input array
   int* r_h;
-  int *r_d;
   cudaMallocHost((void**)&r_h, sizeof(int)*rSize); //use pinned memory in host so it copies to GPU faster
-  cudaMalloc((void**)&r_d, sizeof(int)*rSize);
-
-  //dataGenerator(r_h, rSize, 0, 1);
-  for(int k = 0; k < rSize; k++){
-    r_h[k] = k;
-  }
-  cudaMemcpy(r_d, r_h, sizeof(int)*rSize, cudaMemcpyHostToDevice);
+  dataGenerator(r_h, rSize, 0, 1);
 
   //Declaring histogram
-  int *h_histo, *d_histo;
-  cudaMallocHost(&h_histo, sizeof(int)*num_bins);
-  cudaMalloc(&d_histo, num_bins*sizeof(int));
-  cudaMemcpy(d_histo, h_histo, num_bins*sizeof(int), cudaMemcpyHostToDevice);
+  unsigned long long *h_histo, *d_histo;
+  cudaMallocHost(&h_histo, sizeof(unsigned long long)*num_bins);
+  cudaMalloc(&d_histo, num_bins*sizeof(unsigned long long));
+  cudaMemcpy(d_histo, h_histo, num_bins*sizeof(unsigned long long), cudaMemcpyHostToDevice);
 
   //Declaring prefix sum
   int *h_prefix_sums, *d_prefix_sums;
@@ -193,34 +115,48 @@ int main(int argc, char const *argv[])
   cudaMallocHost((void**)&h_output, sizeof(int)*rSize);
   cudaMalloc((void**)&d_output, sizeof(int)*rSize);
 
+  //Measuring GPU running time
+	cudaEvent_t start,stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
+
   //Calculating histogram
-  histogram<<<gridSize, blockSize>>>(r_d, rSize, d_histo, num_bins);
-  cudaMemcpy(h_histo, d_histo, num_bins*sizeof(int), cudaMemcpyDeviceToHost);
+  histogram<<<gridSize, blockSize, num_bins*sizeof(unsigned long long)>>>(r_h, rSize, d_histo, num_bins);
+  
+  //Performing prefix scan
+  prefixScan<<<gridSize, blockSize>>>(d_histo, num_bins, d_prefix_sums);
+
+  //Performing reorder
+  Reorder<<<gridSize, blockSize>>>(r_h, rSize, num_bins, d_prefix_sums, d_output);
+
+  cudaEventRecord(stop, 0);
+	cudaEventSynchronize(stop);
+	float elapsedTime;
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cudaEventDestroy(start);
+	cudaEventDestroy(stop);
+
+  /*cudaMemcpy(h_histo, d_histo, num_bins*sizeof(unsigned long long), cudaMemcpyDeviceToHost);
   int j;
   for(j = 0; j < num_bins; j++){
     printf("histo[%d] = %d\n", j, h_histo[j]);
   }
-
-  //Performing prefix scan
-  prefixScan<<<gridSize, blockSize>>>(d_histo, num_bins, d_prefix_sums);
   cudaMemcpy(h_prefix_sums, d_prefix_sums, num_bins*sizeof(int), cudaMemcpyDeviceToHost);
   for(int i = 0; i < num_bins; i++){
     printf("prefix[%d] = %d\n", i, h_prefix_sums[i]);
-  }
-
-  //Performing reorder
-  Reorder<<<gridSize, blockSize>>>(r_d, rSize, num_bins, d_prefix_sums, d_output);
+  }*/
   cudaMemcpy(h_output, d_output, rSize*sizeof(int), cudaMemcpyDeviceToHost);
   for(int y = 0; y < rSize; y++){
     printf("output[%d] = %d\n", y, h_output[y]);
   }
+  printf("******Total Running Time of Kernal = %0.5f ms******\n", elapsedTime);
 
   
   cudaFreeHost(r_h);
   cudaFreeHost(h_histo);
   cudaFreeHost(h_prefix_sums);
   cudaFreeHost(h_output);
-  cudaFree(r_d);
   cudaFree(d_histo);
   cudaFree(d_prefix_sums);
   cudaFree(d_output);
