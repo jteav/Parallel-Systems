@@ -63,7 +63,10 @@ __global__ void histogram(int* r, int rSize, unsigned long long *histo, int num_
 
 //define the prefix scan kernel here
 __global__ void prefixScan(unsigned long long *histo, int num_bins, int *sum){
-  for(int i = 0; i < num_bins; i++){
+  uint index = blockIdx.x * blockDim.x + threadIdx.x;
+  uint stride = blockDim.x * gridDim.x;
+  int i;
+  for(i = index; i < num_bins; i += stride){
     if(i == 0)
       sum[i] = 0;
     else
