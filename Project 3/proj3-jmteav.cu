@@ -112,8 +112,8 @@ int main(int argc, char const *argv[])
 
   //Declaring output array
   int *h_output, *d_output;
-  cudaMallocHost((void**)&h_output, sizeof(int)*rSize);
-  cudaMalloc((void**)&d_output, sizeof(int)*rSize);
+  cudaMallocHost(&h_output, sizeof(int)*rSize);
+  cudaMalloc(&d_output, sizeof(int)*rSize);
 
   //Measuring GPU running time
 	cudaEvent_t start,stop;
