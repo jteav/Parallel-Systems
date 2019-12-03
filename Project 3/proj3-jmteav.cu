@@ -1,5 +1,6 @@
 //Johnathan Teav
-//Compile with nvcc proj3-jmteav.cu -arch=compute_52 -code=sm_52
+//Compile with nvcc proj3-jmteav.cu
+//Run with ./a.out [#of_elements][#of_partitions]
 #include <assert.h>
 #include <stdio.h>
 
@@ -91,6 +92,10 @@ __global__ void Reorder(int* r, int rSize, int num_bins, int* prefixSum, int* ou
 
 int main(int argc, char const *argv[])
 {
+  if(argc != 3){
+		printf("Error. Enter the size of the array and the number of partitions.\n");
+		return 0;
+	}
   int rSize = atoi(argv[1]);
   int num_bins = atoi(argv[2]);
   int blockSize = 256;
@@ -111,7 +116,7 @@ int main(int argc, char const *argv[])
   int *h_prefix_sums, *d_prefix_sums;
   cudaMallocHost(&h_prefix_sums, sizeof(int)*num_bins);
   cudaMalloc(&d_prefix_sums, sizeof(int)*num_bins);
-  //cudaMemset(d_prefix_sums, 0, prefixSize);
+  cudaMemset(d_prefix_sums, 0, sizeof(int)*num_bins);
 
   //Declaring output array
   int *h_output, *d_output;
@@ -140,22 +145,18 @@ int main(int argc, char const *argv[])
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
 
-  /*cudaMemcpy(h_histo, d_histo, num_bins*sizeof(unsigned long long), cudaMemcpyDeviceToHost);
-  int j;
-  for(j = 0; j < num_bins; j++){
-    printf("histo[%d] = %d\n", j, h_histo[j]);
-  }
+  //Print histogram and prefix sums
+  cudaMemcpy(h_histo, d_histo, num_bins*sizeof(unsigned long long), cudaMemcpyDeviceToHost);
   cudaMemcpy(h_prefix_sums, d_prefix_sums, num_bins*sizeof(int), cudaMemcpyDeviceToHost);
   for(int i = 0; i < num_bins; i++){
-    printf("prefix[%d] = %d\n", i, h_prefix_sums[i]);
-  }*/
-  cudaMemcpy(h_output, d_output, rSize*sizeof(int), cudaMemcpyDeviceToHost);
-  for(int y = 0; y < rSize; y++){
-    printf("output[%d] = %d\n", y, h_output[y]);
+    printf("%d.\tPartition = %d\t\tPrefix = %d\n", i, h_histo[i], h_prefix_sums[i]);
   }
-  printf("******Total Running Time of Kernal = %0.5f ms******\n", elapsedTime);
+  /*cudaMemcpy(h_output, d_output, rSize*sizeof(int), cudaMemcpyDeviceToHost);
+  for(int y = 0; y < rSize; y++){
+    //printf("output[%d] = %d\n", y, h_output[y]);
+  }*/
+  printf("******Total Running Time of All Kernels = %0.5f ms******\n", elapsedTime);
 
-  
   cudaFreeHost(r_h);
   cudaFreeHost(h_histo);
   cudaFreeHost(h_prefix_sums);
